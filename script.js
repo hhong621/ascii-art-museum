@@ -116,11 +116,29 @@ async function fetchArtworksAndCache() {
 }
 
 // --- Implementation and Rendering ---
-const t = textmode.create({canvas, width: 600, height: 600});
+const CANVAS_WIDTH = 600;
+const CANVAS_HEIGHT = 600;
+const t = textmode.create({canvas, width: CANVAS_WIDTH, height: CANVAS_HEIGHT});
+
+function syncCanvasSize() {
+    t.resizeCanvas(CANVAS_WIDTH, CANVAS_HEIGHT);
+}
+
+function drawArtworkImage() {
+    if (!myImage) return;
+    t.image(myImage, myImage.width, myImage.height);
+}
 
 let myImage;
 let characters = " .:-=+*#%@";
 let imageUrl;
+let sourceCanvas;
+let sourceCtx;
+
+const trail = [];
+const MAX_TRAIL = 250;
+const MAX_SPAWN_PER_MOVE = 4;
+let lastMouse = null;
 
 /**
  * Construct imageUrl using artwork image ID
@@ -133,6 +151,26 @@ async function getImageUrl() {
         const imageUrl = `https://www.artic.edu/iiif/2/${artwork.image_id}/full/843,/0/default.jpg`;
         return imageUrl;
     }
+}
+
+function preloadImage(url) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = url;
+    });
+}
+
+async function applyArtworkImage(url) {
+    await preloadImage(url);
+    imageUrl = url;
+    artworkImage.src = url;
+    if (!isRevealed) {
+        overlay.style.display = 'flex';
+    }
+    loadArtworkImage(url);
 }
 
 /**
@@ -151,30 +189,23 @@ async function renderArtworkData() {
         artist.innerHTML = artwork.artist_display || 'N/A';
         date.innerHTML = artwork.date_display || 'N/A';
 
-        let tempImageUrl = await getImageUrl();
-    
-        // Fetch image using url
-        fetch(tempImageUrl)
-            .then(response => {
-                if (!response.ok) {
-                    // Handle image errors
-                    if (currentIndex < (artworkData.length - 1)) {
-                        currentIndex++;
-                    } else {
-                        currentIndex = 0;
-                    }
-                    renderArtworkData();
-                    throw new Error(`Error fetching image: ${response.statusText}`);
+        const tempImageUrl = await getImageUrl();
+
+        try {
+            const response = await fetch(tempImageUrl);
+            if (!response.ok) {
+                if (currentIndex < (artworkData.length - 1)) {
+                    currentIndex++;
                 } else {
-                    imageUrl = tempImageUrl;
-                    artworkImage.src = tempImageUrl;
-                    renderImage(imageUrl, characters, PARAMS.charColorMode, PARAMS.cellColorMode, PARAMS.charColor, PARAMS.cellColor);
+                    currentIndex = 0;
                 }
-            })
-            .catch(error => {
-                // Handle network errors or errors thrown in the .then block
-                console.error('Fetch error:', error);
-            });
+                renderArtworkData();
+                return;
+            }
+            await applyArtworkImage(tempImageUrl);
+        } catch (error) {
+            console.error('Fetch error:', error);
+        }
     } else if (!artworkData) {
         // Error case already handled in fetchArtworksAndCache, but good for cleanup
         title.innerHTML = "Could not retrieve artwork data due to an error. Check console for details.";
@@ -182,10 +213,6 @@ async function renderArtworkData() {
         title.innerHTML = "No artworks were found with the current query.";
     }
 }
-
-t.setup(() => {
-    renderArtworkData(); // initial call
-});
 
 // Handle WebGL context loss and restoration
 t.canvas.addEventListener("webglcontextlost", handleContextLost, false);
@@ -208,42 +235,6 @@ function handleContextLost(event) {
 function handleContextRestored() {
     window.location.reload();
     console.log("WebGL context restored - resuming render loop");
-}
-
-/**
- * Render the ASCII filtered image on a textmode canvas
- * @param imageUrl url string for image
- * @param characters string of characters for ascii mapping
- * @param charColorMode "fixed" for solid color | "sampled" for image colors
- * @param cellColorMode "fixed" for solid color | "sampled" for image colors
- * @param charColorVal string for char hex color value, white by default
- * @param cellColorVal string for cell hex color value, black by default
- */
-async function renderImage(imageUrl, characters, charColorMode, cellColorMode, charColorVal, cellColorVal) {  
-    console.log(`Render PARAMS => charColorMode: ${charColorMode}, cellColorMode: ${cellColorMode}`);
-
-    myImage = await t.loadImage(imageUrl);
-    // Image is now ready to use
-
-    // Set character set for brightness mapping
-    // Characters are ordered from darkest to brightest
-    myImage.characters(characters);
-
-    // Control character color mode
-    myImage.charColorMode(charColorMode);
-
-    // Control cell background color mode
-    myImage.cellColorMode(cellColorMode);
-
-    // Set fixed character color (when charColorMode is "fixed")
-    myImage.charColor(charColorVal);
-    
-    // Set fixed cell background color (when cellColorMode is "fixed")
-    myImage.cellColor(cellColorVal);
-
-    // Draw image at full grid size
-    t.resizeCanvas(600, 600);
-    t.image(myImage);
 }
 
 /**
@@ -303,21 +294,194 @@ const cellColorBinding = settingsFolder.addBinding(PARAMS, 'cellColor', {
     label: 'Cell Color',
 });
 
+function hexToRgb(hex) {
+    const normalized = hex.replace('#', '');
+    const value = normalized.length === 3
+        ? normalized.split('').map((c) => c + c).join('')
+        : normalized;
+    return [
+        parseInt(value.slice(0, 2), 16),
+        parseInt(value.slice(2, 4), 16),
+        parseInt(value.slice(4, 6), 16),
+    ];
+}
+
+async function loadSourcePixels(url) {
+    const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.crossOrigin = "anonymous";
+        el.onload = () => resolve(el);
+        el.onerror = reject;
+        el.src = url;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    return { canvas, ctx };
+}
+
+function isInsideImageGrid(gridX, gridY) {
+    if (!myImage) return false;
+
+    const width = myImage.width;
+    const height = myImage.height;
+    const localX = gridX + Math.floor(width / 2);
+    const localY = gridY + Math.floor(height / 2);
+
+    return localX >= 0 && localY >= 0 && localX < width && localY < height;
+}
+
+function sampleImageColors(gridX, gridY) {
+    const fixedChar = hexToRgb(PARAMS.charColor);
+    const fixedCell = hexToRgb(PARAMS.cellColor);
+
+    if (!myImage || !sourceCtx || !isInsideImageGrid(gridX, gridY)) {
+        return { char: fixedChar, cell: fixedCell };
+    }
+
+    const width = myImage.width;
+    const height = myImage.height;
+    const localX = gridX + Math.floor(width / 2);
+    const localY = gridY + Math.floor(height / 2);
+
+    const u = (localX + 0.5) / width;
+    const v = 1 - (localY + 0.5) / height;
+    const px = Math.min(sourceCanvas.width - 1, Math.floor(u * sourceCanvas.width));
+    const py = Math.min(sourceCanvas.height - 1, Math.floor(v * sourceCanvas.height));
+    const [r, g, b] = sourceCtx.getImageData(px, py, 1, 1).data;
+    const sampled = [r, g, b];
+
+    return {
+        char: PARAMS.charColorMode === "sampled" ? sampled : fixedChar,
+        cell: PARAMS.cellColorMode === "sampled" ? sampled : fixedCell,
+    };
+}
+
+function configureImage(image) {
+    image.characters(characters);
+    image.charColorMode(PARAMS.charColorMode);
+    image.cellColorMode(PARAMS.cellColorMode);
+    image.charColor(PARAMS.charColor);
+    image.cellColor(PARAMS.cellColor);
+}
+
+async function loadArtworkImage(url) {
+    if (!url) return;
+
+    trail.length = 0;
+    lastMouse = null;
+
+    try {
+        syncCanvasSize();
+        const [image, pixels] = await Promise.all([
+            t.loadImage(url),
+            loadSourcePixels(url),
+        ]);
+        myImage = image;
+        sourceCanvas = pixels.canvas;
+        sourceCtx = pixels.ctx;
+        configureImage(myImage);
+        await new Promise((resolve) => {
+            requestAnimationFrame(() => {
+                syncCanvasSize();
+                resolve();
+            });
+        });
+    } catch (error) {
+        console.error("Failed to load image:", error);
+    }
+}
+
+t.draw(() => {
+    t.background(0);
+
+    drawArtworkImage();
+
+    const trailChars = ["0", "1", "0", "1"];
+
+    for (let i = trail.length - 1; i >= 0; i--) {
+        const p = trail[i];
+        p.age++;
+
+        if (p.age >= p.maxAge) {
+            trail.splice(i, 1);
+            continue;
+        }
+
+        if (!isInsideImageGrid(p.x, p.y)) {
+            continue;
+        }
+
+        const life = 1 - p.age / p.maxAge;
+        const idx = Math.floor(life * trailChars.length);
+        const colors = sampleImageColors(p.x, p.y);
+        const charColor = colors.char.map((c) => Math.round(c * life));
+        const cellColor = colors.cell.map((c) => Math.round(c * life));
+
+        t.push();
+        t.cellColor(cellColor[0], cellColor[1], cellColor[2]);
+        t.charColor(charColor[0], charColor[1], charColor[2]);
+        t.translate(p.x, p.y);
+        t.char(trailChars[Math.min(idx, trailChars.length - 1)]);
+        t.point();
+        t.pop();
+    }
+});
+
+t.mouseMoved((data) => {
+    const { x, y } = data.position;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+    if (!isInsideImageGrid(x, y)) {
+        lastMouse = { x, y };
+        return;
+    }
+
+    const dx = lastMouse ? x - lastMouse.x : 0;
+    const dy = lastMouse ? y - lastMouse.y : 0;
+    const speed = Math.sqrt(dx * dx + dy * dy);
+    const count = Math.min(MAX_SPAWN_PER_MOVE, Math.max(1, Math.ceil(speed * 1.5)));
+
+    for (let i = 0; i < count && trail.length < MAX_TRAIL; i++) {
+        trail.push({
+            x,
+            y,
+            age: 0,
+            maxAge: 15 + Math.random() * 10,
+        });
+    }
+
+    lastMouse = { x, y };
+});
+
+t.windowResized(() => {
+    syncCanvasSize();
+});
+
+document.fonts.ready.then(() => {
+    syncCanvasSize();
+});
+
+t.setup(() => {
+    renderArtworkData();
+});
+
 // Event listener for charColorMode, charColorBinding input is hidden when set to "sampled"
 charColorModeBinding.on('change', (event) => {
     const isHidden = event.value === 'sampled';
     charColorBinding.hidden = isHidden;
     PARAMS.charColorMode = event.value;
-    renderImage(imageUrl, characters, PARAMS.charColorMode, PARAMS.cellColorMode, PARAMS.charColor, PARAMS.cellColor);
+    if (myImage) configureImage(myImage);
 });
 
 // Initial state for charColorBinding input
 charColorBinding.hidden = true;
 
 // Event listener for charColorBinding
-charColorBinding.on('change', (event) => {
-    console.log("char color change")
-    renderImage(imageUrl, characters, PARAMS.charColorMode, PARAMS.cellColorMode, PARAMS.charColor, PARAMS.cellColor);
+charColorBinding.on('change', () => {
+    if (myImage) configureImage(myImage);
 });
 
 // Event listener for cellColorMode, cellColorBinding input is hidden when set to "sampled"
@@ -325,13 +489,13 @@ cellColorModeBinding.on('change', (event) => {
     const isHidden = event.value === 'sampled';
     cellColorBinding.hidden = isHidden;
     PARAMS.cellColorMode = event.value;
-    renderImage(imageUrl, characters, PARAMS.charColorMode, PARAMS.cellColorMode, PARAMS.charColor, PARAMS.cellColor);
+    if (myImage) configureImage(myImage);
 });
 
 // Event listener for cellColorBinding
-cellColorBinding.on('change', (event) => {
-    renderImage(imageUrl, characters, PARAMS.charColorMode, PARAMS.cellColorMode, PARAMS.charColor, PARAMS.cellColor);
-})
+cellColorBinding.on('change', () => {
+    if (myImage) configureImage(myImage);
+});
 
 // Setup show artwork button (mobile only)
 const showArtworkBtn = actionsFolder.addButton({
@@ -357,7 +521,7 @@ function screenCheck() {
 }
 
 // Event listener for show artwork button click, opens sheet
-showArtworkBtn.on('click', async () => {
+showArtworkBtn.on('click', () => {
     artworkContainer.style.display = "block";
     document.body.classList.add("modal-open");
 });
@@ -376,7 +540,6 @@ nextBtn.on('click', async () => {
         currentIndex = 0;
     }
     setIsRevealed(false);
-    overlay.style.display = "flex";
     renderArtworkData();
 });
 
@@ -386,12 +549,12 @@ const resetBtn = actionsFolder.addButton({
 });
 
 // Event listener for reset colors button
-resetBtn.on('click', async () => {
+resetBtn.on('click', () => {
     PARAMS.charColorMode = "sampled";
     PARAMS.charColor = "#ffffff";
     PARAMS.cellColorMode = "fixed";
     PARAMS.cellColor = "#000000";
-    renderImage(imageUrl, characters, PARAMS.charColorMode, PARAMS.cellColorMode, PARAMS.charColor, PARAMS.cellColor);
+    if (myImage) configureImage(myImage);
     pane.refresh();
 });
 
@@ -404,35 +567,33 @@ function setIsRevealed(revealed) {
     if (revealed) {
         imageContainer.style.top = (artworkText.offsetHeight + 32) + "px";
         artworkText.style.opacity = 1;
+        overlay.style.display = 'none';
     } else {
         imageContainer.style.top = 0;
         artworkText.style.opacity = 0;
+        overlay.style.display = 'flex';
     }
 }
 
-// Overlay onClick listener, update revealed state to true
-overlay.addEventListener('click', async () => {
+overlay.addEventListener('click', () => {
     setIsRevealed(true);
-    overlay.style.display = "none";
 });
 
 // Mobile event listeners
 
 // Sheet scrim onClick listener, closes sheet
-artworkContainer.addEventListener('click', async () => {
+artworkContainer.addEventListener('click', () => {
     artworkContainer.style.display = "none";
     document.body.classList.remove("modal-open");
 });
 
 // Close button onClick listener, closes sheet
-document.getElementById('sheet-close').addEventListener('click', async () => {
+document.getElementById('sheet-close').addEventListener('click', () => {
     artworkContainer.style.display = "none";
     document.body.classList.remove("modal-open");
 });
 
 // Sheet surface onClick listener, prevents surface clicks from closing sheet
-document.getElementById('artwork-wrapper').addEventListener('click', async (event) => {
+document.getElementById('artwork-wrapper').addEventListener('click', (event) => {
     event.stopPropagation();
 });
-
-setTimeout(function(){renderImage(imageUrl, characters, PARAMS.charColorMode, PARAMS.cellColorMode, PARAMS.charColor, PARAMS.cellColor)}, 1500);
