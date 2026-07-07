@@ -1,7 +1,16 @@
 // --- Configuration ---
 const ARTWORKS_URL = "https://api.artic.edu/api/v1/artworks";
+const IIIF_BASE = "https://www.artic.edu/iiif/2";
+const IIIF_SIZE = "843,";
 const CACHE_KEY = 'aicArtworksCache';
 const CACHE_DURATION = 60 * 60 * 1000; // Cache expiration time in milliseconds (1 hour = 60 * 60 * 1000)
+const ARTWORK_BATCH_SIZE = 10;
+const MIN_BATCH_WITH_IMAGES = 5;
+const MAX_BATCH_FETCH_ATTEMPTS = 20;
+const ARTWORK_FIELDS = 'id,title,image_id,artist_display,date_display';
+const AIC_HEADERS = {
+    'AIC-User-Agent': 'ascii-art-museum (https://hhong621.github.io/ARTIC-ASCII/)',
+};
 let currentIndex = 0;
 let isRevealed = false;
 const artworkText = document.getElementById('artwork-text');
@@ -13,43 +22,93 @@ const artworkContainer = document.getElementById('artwork-container');
 const controls = document.getElementById('controls');
 
 /**
- * Use limit = 0 to get the total number of artworks from the API
- * @returns number of total pages
+ * @returns {Promise<number>}
  */
-async function getPageTotal() {
-    // Get the total number of artworks (using limit=0)
-    try {
-        const countResponse = await fetch(`${ARTWORKS_URL}?limit=0`);
-        if (!countResponse.ok) {
-            throw new Error(`HTTP error! status: ${countResponse.status}`);
-        }
-        const countData = await countResponse.json();
-
-        const totalArtworks = countData.pagination.total;
-        if (totalArtworks === 0) {
-            console.error("Error: Total artwork count is zero.");
-            return null;
-        } else {
-            return totalArtworks;
-        }
-    } catch (error) {
-        console.error('An error occurred while fetching total artwork count:', error);
-        return null;
+async function getArtworkIdUpperBound() {
+    const countResponse = await fetch(`${ARTWORKS_URL}?limit=0`, { headers: AIC_HEADERS });
+    if (!countResponse.ok) {
+        throw new Error(`HTTP error! status: ${countResponse.status}`);
     }
+
+    const countData = await countResponse.json();
+    const totalArtworks = countData.pagination.total;
+    if (totalArtworks === 0) {
+        throw new Error('No artworks found.');
+    }
+
+    return totalArtworks;
 }
 
 /**
- * Use the getPageTotal() function to generate random IDs
- * @returns array of random artwork IDs
+ * @param {number} count
+ * @param {number} upperBound
+ * @param {Set<number>} seenIds
+ * @returns {number[]}
  */
-async function getRandomIDs() {
-    let idArr = [];
-    const response = await getPageTotal();
-    for (let i = 0; i < 10; i++) {
-        const randomID = Math.floor(Math.random() * response) + 1;
-        idArr.push(randomID);
+function pickRandomArtworkIds(count, upperBound, seenIds) {
+    const ids = [];
+    const maxTries = count * 10;
+
+    for (let tries = 0; ids.length < count && tries < maxTries; tries++) {
+        const id = Math.floor(Math.random() * upperBound) + 1;
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        ids.push(id);
     }
-    return idArr;
+
+    return ids;
+}
+
+/**
+ * @param {number[]} ids
+ * @returns {Promise<Array<Object>>}
+ */
+async function fetchArtworksByIds(ids) {
+    if (ids.length === 0) return [];
+
+    const response = await fetch(
+        `${ARTWORKS_URL}?ids=${ids.join(',')}&fields=${ARTWORK_FIELDS}`,
+        { headers: AIC_HEADERS },
+    );
+    if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const apiResponse = await response.json();
+    return apiResponse.data ?? [];
+}
+
+/**
+ * Fetch a random batch of artworks that have images.
+ * @returns {Promise<Array<Object>>}
+ */
+async function fetchArtworksFromApi() {
+    const upperBound = await getArtworkIdUpperBound();
+    const seenIds = new Set();
+    const artworks = [];
+    const artworkIds = new Set();
+
+    for (let attempt = 0; attempt < MAX_BATCH_FETCH_ATTEMPTS; attempt++) {
+        if (artworks.length >= ARTWORK_BATCH_SIZE) break;
+
+        const ids = pickRandomArtworkIds(ARTWORK_BATCH_SIZE, upperBound, seenIds);
+        if (ids.length === 0) break;
+
+        const batch = await fetchArtworksByIds(ids);
+        for (const artwork of batch) {
+            if (!artwork.image_id || artworkIds.has(artwork.id)) continue;
+            artworkIds.add(artwork.id);
+            artworks.push(artwork);
+        }
+    }
+
+    if (artworks.length < MIN_BATCH_WITH_IMAGES) {
+        throw new Error(
+            `Could only find ${artworks.length} artworks with images (minimum ${MIN_BATCH_WITH_IMAGES}).`,
+        );
+    }
+
+    return artworks;
 }
 
 /**
@@ -84,19 +143,10 @@ async function fetchArtworksAndCache() {
 
     // Fetch data from the AIC API (Network call)
     try {
-        const idString = (await getRandomIDs()).join(',');
-        console.log(idString);
-        const response = await fetch(`${ARTWORKS_URL}?ids=${idString}&fields=id,title,image_id,artist_display,date_display`);
-
-        // Throw an error if the HTTP response status is not successful
-        if (!response.ok) {
-            throw new Error(`HTTP error! Status: ${response.status}`);
+        const artworks = await fetchArtworksFromApi();
+        if (artworks.length < MIN_BATCH_WITH_IMAGES) {
+            throw new Error(`Fewer than ${MIN_BATCH_WITH_IMAGES} artworks with images in this batch.`);
         }
-
-        const apiResponse = await response.json();
-
-        // Ensure we extract only the necessary 'data' array
-        const artworks = apiResponse.data;
 
         // Update the cache with the new data and a fresh timestamp
         const cachePayload = {
@@ -110,7 +160,6 @@ async function fetchArtworksAndCache() {
 
     } catch (error) {
         console.error('An error occurred during API fetch:', error);
-        document.getElementById('artworks-list').innerHTML = `<li class="text-red-600">Failed to load data: ${error.message}</li>`;
         return null;
     }
 }
@@ -140,23 +189,15 @@ const MAX_TRAIL = 250;
 const MAX_SPAWN_PER_MOVE = 4;
 let lastMouse = null;
 
-/**
- * Construct imageUrl using artwork image ID
- * @returns imageUrl string
- */
-async function getImageUrl() {
-    const artworkData = await fetchArtworksAndCache();
-    if (artworkData && artworkData.length > 0) {
-        const artwork = artworkData[currentIndex];
-        const imageUrl = `https://www.artic.edu/iiif/2/${artwork.image_id}/full/843,/0/default.jpg`;
-        return imageUrl;
-    }
+function buildImageUrl(imageId) {
+    return `${IIIF_BASE}/${imageId}/full/${IIIF_SIZE}/0/default.jpg`;
 }
 
 function preloadImage(url) {
     return new Promise((resolve, reject) => {
         const img = new Image();
         img.crossOrigin = 'anonymous';
+        img.referrerPolicy = 'no-referrer';
         img.onload = () => resolve(img);
         img.onerror = reject;
         img.src = url;
@@ -170,47 +211,52 @@ async function applyArtworkImage(url) {
     if (!isRevealed) {
         overlay.style.display = 'flex';
     }
-    loadArtworkImage(url);
+    await loadArtworkImage(url);
 }
 
 /**
  * Display the data and image of the current artwork
+ * @param {number} skipAttempts - how many artworks have been skipped this render pass
  */
-async function renderArtworkData() {
-
+async function renderArtworkData(skipAttempts = 0) {
+    const title = document.getElementById("artwork-title");
+    const artist = document.getElementById("artwork-artist");
+    const date = document.getElementById("artwork-date");
     const artworkData = await fetchArtworksAndCache();
 
-    if (artworkData && artworkData.length > 0) {
-        const artwork = artworkData[currentIndex];
-        const title = document.getElementById("artwork-title");
-        const artist = document.getElementById("artwork-artist");
-        const date = document.getElementById("artwork-date");
-        title.innerHTML = artwork.title;
-        artist.innerHTML = artwork.artist_display || 'N/A';
-        date.innerHTML = artwork.date_display || 'N/A';
-
-        const tempImageUrl = await getImageUrl();
-
-        try {
-            const response = await fetch(tempImageUrl);
-            if (!response.ok) {
-                if (currentIndex < (artworkData.length - 1)) {
-                    currentIndex++;
-                } else {
-                    currentIndex = 0;
-                }
-                renderArtworkData();
-                return;
-            }
-            await applyArtworkImage(tempImageUrl);
-        } catch (error) {
-            console.error('Fetch error:', error);
-        }
-    } else if (!artworkData) {
-        // Error case already handled in fetchArtworksAndCache, but good for cleanup
+    if (!artworkData) {
         title.innerHTML = "Could not retrieve artwork data due to an error. Check console for details.";
-    } else {
+        return;
+    }
+
+    if (artworkData.length === 0) {
         title.innerHTML = "No artworks were found with the current query.";
+        return;
+    }
+
+    if (skipAttempts >= artworkData.length) {
+        title.innerHTML = "Could not load any artwork images. Try again later.";
+        artist.innerHTML = "";
+        date.innerHTML = "";
+        return;
+    }
+
+    const artwork = artworkData[currentIndex];
+    title.innerHTML = artwork.title;
+    artist.innerHTML = artwork.artist_display || 'N/A';
+    date.innerHTML = artwork.date_display || 'N/A';
+
+    if (!artwork.image_id) {
+        currentIndex = (currentIndex + 1) % artworkData.length;
+        return renderArtworkData(skipAttempts + 1);
+    }
+
+    try {
+        await applyArtworkImage(buildImageUrl(artwork.image_id));
+    } catch (error) {
+        console.error('Failed to load artwork image:', error);
+        currentIndex = (currentIndex + 1) % artworkData.length;
+        return renderArtworkData(skipAttempts + 1);
     }
 }
 
@@ -310,6 +356,7 @@ async function loadSourcePixels(url) {
     const img = await new Promise((resolve, reject) => {
         const el = new Image();
         el.crossOrigin = "anonymous";
+        el.referrerPolicy = "no-referrer";
         el.onload = () => resolve(el);
         el.onerror = reject;
         el.src = url;
@@ -391,6 +438,7 @@ async function loadArtworkImage(url) {
         });
     } catch (error) {
         console.error("Failed to load image:", error);
+        throw error;
     }
 }
 
