@@ -96,6 +96,7 @@ async function fetchArtworksFromApi() {
 
         const batch = await fetchArtworksByIds(ids);
         for (const artwork of batch) {
+            if (artworks.length >= ARTWORK_BATCH_SIZE) break;
             if (!artwork.image_id || artworkIds.has(artwork.id)) continue;
             artworkIds.add(artwork.id);
             artworks.push(artwork);
