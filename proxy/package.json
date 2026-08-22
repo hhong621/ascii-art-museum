@@ -1,0 +1,14 @@
+{
+  "name": "artic-ascii-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "setup-browser": "node setup-browser.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "playwright-core": "^1.49.1"
+  }
+}
