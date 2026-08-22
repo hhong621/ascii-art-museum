@@ -3,12 +3,66 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Redirecting to ASCII Art Museum</title>
-    <link rel="canonical" href="https://hhong621.github.io/ascii-art-museum/">
-    <meta http-equiv="refresh" content="0; url=https://hhong621.github.io/ascii-art-museum/">
-    <script>window.location.replace("https://hhong621.github.io/ascii-art-museum/");</script>
+    <meta name="referrer" content="no-referrer">
+    <title>ASCII Art Museum</title>
+    <link href="style.css" rel="stylesheet">
+    <script src="https://unpkg.com/textmode.js@0.9.1/dist/textmode.umd.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&family=Libre+Baskerville:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
+    <link rel="apple-touch-icon" sizes="180x180" href="favicon/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="favicon/favicon-16x16.png">
+    <link rel="manifest" href="favicon/site.webmanifest">
+    <meta property="og:title" content="ASCII Art Museum">
+    <meta property="og:description" content="ASCII Art Museum ASCII art renderings of artworks from the Met Collection API. Artworks come in a small batch and update every hour.">
+    <meta property="og:image" content="https://hhong621.github.io/ARTIC-ASCII/images/preview.png">
+    <meta property="og:url" content="https://hhong621.github.io/ARTIC-ASCII/">
+    <meta name="twitter:card" content="summary_large_image">
 </head>
 <body>
-    <p>This site has moved. Redirecting to <a href="https://hhong621.github.io/ascii-art-museum/">ASCII Art Museum</a>…</p>
+    <div id="col-artwork">
+        <div id="intro">
+            <a href="https://hhong621.github.io/work/" target="_blank" style="color: #d6f50c; text-decoration: none; font-family: 'JetBrains Mono', monospace; width: fit-content;">Harrison Hong</a>
+            <h1>ASCII Art Museum</h1>
+            <p>This project combines my love for art museums and ASCII art. Artworks come in a small batch and update every hour. Enjoy!
+                <br><br>Images and artwork data are from the <a href="https://www.metmuseum.org/perspectives/met-collection-api-2" target="_blank">Met Collection API</a>. ASCII library is from <a href="https://code.textmode.art/" target="_blank">textmode.js</a>.</p>
+        </div>
+        <div id="artwork-container">
+            <div id="artwork-wrapper">
+                <div class="sheet-header">
+                    <span style="margin: 1.25rem 0 0 1rem;">Artwork</span>
+                    <span id="sheet-close" style="margin: 1.25rem 1rem 0 0;">Close</span>
+                </div>
+                <div id="artwork-text">
+                    <div class="text-row">
+                        <span class="row-title">Title</span>
+                        <span id="artwork-title"></span>
+                    </div>
+                    <div class="text-row">
+                        <span class="row-title">Artist</span>
+                        <span id="artwork-artist"></span>
+                    </div>
+                    <div class="text-row">
+                        <span class="row-title">Date</span>
+                        <span id="artwork-date"></span>
+                    </div>
+                </div>
+                <div id="image-container">
+                    <div id="image-wrapper">
+                        <img id="image" referrerpolicy="no-referrer" crossorigin="anonymous"/>
+                        <div id="overlay">Click to Reveal</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="col-canvas">
+        <div id="col-canvas-body">
+            <canvas id="textmode-canvas"></canvas>
+            <div id="controls"></div>
+        </div>
+    </div>
+    <script type="module" src="script.js"></script>
 </body>
 </html>

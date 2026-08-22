@@ -4,9 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Redirecting to ASCII Art Museum</title>
-    <link rel="canonical" href="https://hhong621.github.io/ascii-art-museum/">
-    <meta http-equiv="refresh" content="0; url=https://hhong621.github.io/ascii-art-museum/">
-    <script>window.location.replace("https://hhong621.github.io/ascii-art-museum/");</script>
+    <script>
+        (function () {
+            var target = 'https://hhong621.github.io' +
+                location.pathname.replace(/^\/ARTIC-ASCII/, '/ascii-art-museum') +
+                location.search +
+                location.hash;
+            document.write(
+                '<link rel="canonical" href="' + target + '">' +
+                '<meta http-equiv="refresh" content="0; url=' + target + '">'
+            );
+            location.replace(target);
+        }());
+    </script>
 </head>
 <body>
     <p>This site has moved. Redirecting to <a href="https://hhong621.github.io/ascii-art-museum/">ASCII Art Museum</a>…</p>

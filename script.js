@@ -1,3 +1,12 @@
+if (/^\/ARTIC-ASCII(\/|$)/.test(location.pathname)) {
+    location.replace(
+        'https://hhong621.github.io' +
+        location.pathname.replace(/^\/ARTIC-ASCII/, '/ascii-art-museum') +
+        location.search +
+        location.hash
+    );
+}
+
 // --- Configuration ---
 const MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1";
 const CACHE_KEY = 'metArtworksCacheV2';
