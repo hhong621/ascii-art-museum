@@ -2,7 +2,9 @@
 
 A browser-based gallery that renders artworks from the [Metropolitan Museum of Art](https://www.metmuseum.org/) as live ASCII art. Each session pulls a small random batch from the [Met Collection API](https://www.metmuseum.org/perspectives/met-collection-api-2), cached in `localStorage` for one hour.
 
-**[Live demo](https://hhong621.github.io/ARTIC-ASCII/)**
+**[Live demo](https://hhong621.github.io/ascii-art-museum/)**
+
+> This repository now redirects to [ascii-art-museum](https://hhong621.github.io/ascii-art-museum/). The live site is maintained in the [ascii-art-museum](https://github.com/hhong621/ascii-art-museum) repo.
 
 ## Features
 
