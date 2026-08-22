@@ -1,16 +1,11 @@
 // --- Configuration ---
-const ARTWORKS_URL = "https://api.artic.edu/api/v1/artworks";
-const IIIF_BASE = "https://www.artic.edu/iiif/2";
-const IIIF_SIZE = "843,";
-const CACHE_KEY = 'aicArtworksCache';
+const MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1";
+const CACHE_KEY = 'metArtworksCacheV2';
 const CACHE_DURATION = 60 * 60 * 1000; // Cache expiration time in milliseconds (1 hour = 60 * 60 * 1000)
 const ARTWORK_BATCH_SIZE = 10;
 const MIN_BATCH_WITH_IMAGES = 5;
 const MAX_BATCH_FETCH_ATTEMPTS = 20;
-const ARTWORK_FIELDS = 'id,title,image_id,artist_display,date_display';
-const AIC_HEADERS = {
-    'AIC-User-Agent': 'ascii-art-museum (https://hhong621.github.io/ARTIC-ASCII/)',
-};
+const SEARCH_POOL_SIZE = 1000;
 let currentIndex = 0;
 let isRevealed = false;
 const artworkText = document.getElementById('artwork-text');
@@ -22,35 +17,34 @@ const artworkContainer = document.getElementById('artwork-container');
 const controls = document.getElementById('controls');
 
 /**
- * @returns {Promise<number>}
+ * @returns {Promise<number[]>}
  */
-async function getArtworkIdUpperBound() {
-    const countResponse = await fetch(`${ARTWORKS_URL}?limit=0`, { headers: AIC_HEADERS });
-    if (!countResponse.ok) {
-        throw new Error(`HTTP error! status: ${countResponse.status}`);
+async function searchArtworkIds() {
+    const response = await fetch(`${MET_API_BASE}/search?hasImages=true&q=painting`);
+    if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
     }
 
-    const countData = await countResponse.json();
-    const totalArtworks = countData.pagination.total;
-    if (totalArtworks === 0) {
+    const data = await response.json();
+    if (!data.objectIDs?.length) {
         throw new Error('No artworks found.');
     }
 
-    return totalArtworks;
+    return data.objectIDs.slice(0, SEARCH_POOL_SIZE);
 }
 
 /**
+ * @param {number[]} pool
  * @param {number} count
- * @param {number} upperBound
  * @param {Set<number>} seenIds
  * @returns {number[]}
  */
-function pickRandomArtworkIds(count, upperBound, seenIds) {
+function pickRandomIds(pool, count, seenIds) {
     const ids = [];
     const maxTries = count * 10;
 
     for (let tries = 0; ids.length < count && tries < maxTries; tries++) {
-        const id = Math.floor(Math.random() * upperBound) + 1;
+        const id = pool[Math.floor(Math.random() * pool.length)];
         if (seenIds.has(id)) continue;
         seenIds.add(id);
         ids.push(id);
@@ -60,22 +54,50 @@ function pickRandomArtworkIds(count, upperBound, seenIds) {
 }
 
 /**
- * @param {number[]} ids
- * @returns {Promise<Array<Object>>}
+ * Met's CDN intermittently omits CORS headers; only keep images that load with crossOrigin.
+ * @param {string} url
+ * @returns {Promise<boolean>}
  */
-async function fetchArtworksByIds(ids) {
-    if (ids.length === 0) return [];
-
-    const response = await fetch(
-        `${ARTWORKS_URL}?ids=${ids.join(',')}&fields=${ARTWORK_FIELDS}`,
-        { headers: AIC_HEADERS },
-    );
-    if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+async function imageAllowsCors(url) {
+    try {
+        const response = await fetch(url, { method: 'HEAD', mode: 'cors' });
+        return response.ok;
+    } catch {
+        return false;
     }
+}
 
-    const apiResponse = await response.json();
-    return apiResponse.data ?? [];
+/**
+ * @param {Object} obj
+ * @returns {Promise<string | null>}
+ */
+async function pickCorsImageUrl(obj) {
+    const candidates = [obj.primaryImage, obj.primaryImageSmall].filter(Boolean);
+    for (const url of candidates) {
+        if (await imageAllowsCors(url)) return url;
+    }
+    return null;
+}
+
+/**
+ * @param {number} id
+ * @returns {Promise<Object | null>}
+ */
+async function fetchArtworkById(id) {
+    const response = await fetch(`${MET_API_BASE}/objects/${id}`);
+    if (!response.ok) return null;
+
+    const obj = await response.json();
+    const image_url = await pickCorsImageUrl(obj);
+    if (!image_url) return null;
+
+    return {
+        id: obj.objectID,
+        title: obj.title || 'Untitled',
+        artist_display: obj.artistDisplayName || 'N/A',
+        date_display: obj.objectDate || 'N/A',
+        image_url,
+    };
 }
 
 /**
@@ -83,7 +105,7 @@ async function fetchArtworksByIds(ids) {
  * @returns {Promise<Array<Object>>}
  */
 async function fetchArtworksFromApi() {
-    const upperBound = await getArtworkIdUpperBound();
+    const pool = await searchArtworkIds();
     const seenIds = new Set();
     const artworks = [];
     const artworkIds = new Set();
@@ -91,13 +113,13 @@ async function fetchArtworksFromApi() {
     for (let attempt = 0; attempt < MAX_BATCH_FETCH_ATTEMPTS; attempt++) {
         if (artworks.length >= ARTWORK_BATCH_SIZE) break;
 
-        const ids = pickRandomArtworkIds(ARTWORK_BATCH_SIZE, upperBound, seenIds);
+        const ids = pickRandomIds(pool, ARTWORK_BATCH_SIZE * 2, seenIds);
         if (ids.length === 0) break;
 
-        const batch = await fetchArtworksByIds(ids);
+        const batch = await Promise.all(ids.map(fetchArtworkById));
         for (const artwork of batch) {
             if (artworks.length >= ARTWORK_BATCH_SIZE) break;
-            if (!artwork.image_id || artworkIds.has(artwork.id)) continue;
+            if (!artwork || artworkIds.has(artwork.id)) continue;
             artworkIds.add(artwork.id);
             artworks.push(artwork);
         }
@@ -142,7 +164,7 @@ async function fetchArtworksAndCache() {
         // Proceed to fetch new data
     }
 
-    // Fetch data from the AIC API (Network call)
+    // Fetch data from the Met API (Network call)
     try {
         const artworks = await fetchArtworksFromApi();
         if (artworks.length < MIN_BATCH_WITH_IMAGES) {
@@ -189,10 +211,6 @@ const trail = [];
 const MAX_TRAIL = 250;
 const MAX_SPAWN_PER_MOVE = 4;
 let lastMouse = null;
-
-function buildImageUrl(imageId) {
-    return `${IIIF_BASE}/${imageId}/full/${IIIF_SIZE}/0/default.jpg`;
-}
 
 function preloadImage(url) {
     return new Promise((resolve, reject) => {
@@ -247,13 +265,13 @@ async function renderArtworkData(skipAttempts = 0) {
     artist.innerHTML = artwork.artist_display || 'N/A';
     date.innerHTML = artwork.date_display || 'N/A';
 
-    if (!artwork.image_id) {
+    if (!artwork.image_url) {
         currentIndex = (currentIndex + 1) % artworkData.length;
         return renderArtworkData(skipAttempts + 1);
     }
 
     try {
-        await applyArtworkImage(buildImageUrl(artwork.image_id));
+        await applyArtworkImage(artwork.image_url);
     } catch (error) {
         console.error('Failed to load artwork image:', error);
         currentIndex = (currentIndex + 1) % artworkData.length;
@@ -423,13 +441,17 @@ async function loadArtworkImage(url) {
 
     try {
         syncCanvasSize();
-        const [image, pixels] = await Promise.all([
-            t.loadImage(url),
-            loadSourcePixels(url),
-        ]);
+        const imagePromise = t.loadImage(url);
+        let pixels = null;
+        try {
+            pixels = await loadSourcePixels(url);
+        } catch (error) {
+            console.warn('Pixel sampling unavailable for image:', url, error);
+        }
+        const image = await imagePromise;
         myImage = image;
-        sourceCanvas = pixels.canvas;
-        sourceCtx = pixels.ctx;
+        sourceCanvas = pixels?.canvas ?? null;
+        sourceCtx = pixels?.ctx ?? null;
         configureImage(myImage);
         await new Promise((resolve) => {
             requestAnimationFrame(() => {
