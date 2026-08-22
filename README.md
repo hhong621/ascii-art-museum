@@ -1,6 +1,6 @@
 # ASCII Art Museum
 
-A browser-based gallery that renders artworks from the [Art Institute of Chicago](https://www.artic.edu/) as live ASCII art. Each session pulls a small random batch from the [AIC API](https://api.artic.edu/docs/#introduction), cached in `localStorage` for one hour.
+A browser-based gallery that renders artworks from the [Metropolitan Museum of Art](https://www.metmuseum.org/) as live ASCII art. Each session pulls a small random batch from the [Met Collection API](https://www.metmuseum.org/perspectives/met-collection-api-2), cached in `localStorage` for one hour.
 
 **[Live demo](https://hhong621.github.io/ARTIC-ASCII/)**
 
@@ -23,4 +23,4 @@ Then open the URL shown in the terminal.
 
 ## Credits
 
-Artwork images and metadata from the [Art Institute of Chicago API](https://api.artic.edu/docs/#introduction). ASCII rendering powered by [textmode.js](https://code.textmode.art/).
+Artwork images and metadata from the [Met Collection API](https://www.metmuseum.org/perspectives/met-collection-api-2). ASCII rendering powered by [textmode.js](https://code.textmode.art/).
