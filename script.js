@@ -1,10 +1,16 @@
 // --- Configuration ---
-const MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1";
-const CACHE_KEY = 'metArtworksCacheV3';
+const MET_API_DIRECT = "https://collectionapi.metmuseum.org/public/collection/v1";
+const CACHE_KEY = 'metArtworksCacheV4';
 const MET_IMAGE_HOST = 'images.metmuseum.org';
 const MAX_ASCII_IMAGE_DIM = 1200;
 const API_FETCH_CONCURRENCY = 3;
-const LOCAL_IMAGE_PROXY = 'http://localhost:3001/met-image';
+const API_FETCH_CONCURRENCY_DIRECT = 1;
+const API_REQUEST_DELAY_MS = 300;
+const IMAGE_LOAD_RETRY_DELAY_MS = 400;
+const LOCAL_PROXY_CANDIDATES = [
+    'http://127.0.0.1:3001',
+    'http://localhost:3001',
+];
 const CACHE_DURATION = 60 * 60 * 1000; // Cache expiration time in milliseconds (1 hour = 60 * 60 * 1000)
 const ARTWORK_BATCH_SIZE = 10;
 const MIN_BATCH_WITH_IMAGES = 5;
@@ -20,11 +26,90 @@ const imageContainer = document.getElementById('image-container');
 const artworkContainer = document.getElementById('artwork-container');
 const controls = document.getElementById('controls');
 
+let metApiBase = MET_API_DIRECT;
+let localProxyBase = null;
+let proxyProbeDone = false;
+
+function isLocalDevHost() {
+    const { hostname } = window.location;
+    return hostname === 'localhost' || hostname === '127.0.0.1';
+}
+
+async function resolveLocalProxy() {
+    if (proxyProbeDone) return localProxyBase;
+    proxyProbeDone = true;
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('imageProxy')) {
+        localProxyBase = params.get('imageProxy')
+            ? params.get('imageProxy').replace(/\/$/, '')
+            : null;
+        if (localProxyBase) {
+            metApiBase = `${localProxyBase}/met-api/public/collection/v1`;
+        }
+        return localProxyBase;
+    }
+
+    if (!isLocalDevHost()) return null;
+
+    for (const base of LOCAL_PROXY_CANDIDATES) {
+        try {
+            const response = await fetch(`${base}/health`, {
+                signal: AbortSignal.timeout(1500),
+            });
+            if (response.ok) {
+                localProxyBase = base;
+                metApiBase = `${base}/met-api/public/collection/v1`;
+                console.log(`Using local Met proxy at ${base}`);
+                return localProxyBase;
+            }
+        } catch {
+            // try next candidate
+        }
+    }
+
+    console.warn(
+        'Local Met proxy not detected. Start it with: cd proxy && npm install && npm run dev',
+    );
+    showDevProxyNotice();
+    return null;
+}
+
+function showDevProxyNotice() {
+    if (document.getElementById('dev-proxy-notice')) return;
+
+    const notice = document.createElement('div');
+    notice.id = 'dev-proxy-notice';
+    notice.innerHTML =
+        'Local dev needs the Met proxy. Run <code>cd proxy && npm install && npm run dev</code>, then refresh.';
+    notice.style.cssText = [
+        'position: fixed',
+        'bottom: 1rem',
+        'left: 50%',
+        'transform: translateX(-50%)',
+        'z-index: 1000',
+        'max-width: 34rem',
+        'padding: 0.75rem 1rem',
+        'border-radius: 0.5rem',
+        'background: #1a1a1a',
+        'color: #d6f50c',
+        'font-family: "JetBrains Mono", monospace',
+        'font-size: 0.8rem',
+        'line-height: 1.4',
+        'box-shadow: 0 8px 24px rgba(0,0,0,0.35)',
+    ].join(';');
+    document.body.appendChild(notice);
+}
+
+function getApiFetchConcurrency() {
+    return localProxyBase ? API_FETCH_CONCURRENCY : API_FETCH_CONCURRENCY_DIRECT;
+}
+
 /**
  * @returns {Promise<number[]>}
  */
 async function searchArtworkIds() {
-    const response = await fetch(`${MET_API_BASE}/search?hasImages=true&q=painting`);
+    const response = await fetch(`${metApiBase}/search?hasImages=true&q=painting`);
     if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -66,24 +151,67 @@ function isMetCdnUrl(url) {
 }
 
 function getImageProxyBase() {
+    if (localProxyBase) return localProxyBase;
+
     const params = new URLSearchParams(window.location.search);
-    if (params.has('imageProxy')) {
-        const override = params.get('imageProxy');
-        return override ? override.replace(/\/$/, '') : null;
-    }
+    if (!params.has('imageProxy')) return null;
 
-    const { hostname } = window.location;
-    if (hostname === 'localhost' || hostname === '127.0.0.1') {
-        return LOCAL_IMAGE_PROXY;
-    }
-
-    return null;
+    const override = params.get('imageProxy');
+    return override ? override.replace(/\/$/, '') : null;
 }
 
-function canvasImageUrl(url) {
+function proxiedImageUrl(url, proxyBase) {
+    return `${proxyBase.replace(/\/$/, '')}/met-image?src=${encodeURIComponent(url)}`;
+}
+
+function canvasImageCandidates(url) {
+    const candidates = [url];
     const proxyBase = getImageProxyBase();
-    if (!proxyBase || !url) return url;
-    return `${proxyBase}?src=${encodeURIComponent(url)}`;
+    if (proxyBase) {
+        candidates.push(proxiedImageUrl(url, proxyBase));
+    }
+    return [...new Set(candidates)];
+}
+
+function artworkImageCandidates(artwork) {
+    const urls = artwork.image_urls?.length
+        ? artwork.image_urls
+        : [artwork.image_url].filter(Boolean);
+
+    if (localProxyBase) {
+        return [...new Set(urls.map((url) => proxiedImageUrl(url, localProxyBase)))];
+    }
+
+    return [...new Set(urls.flatMap(canvasImageCandidates))];
+}
+
+async function loadImageElement(url) {
+    if (localProxyBase && url.startsWith(localProxyBase)) {
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Image failed: ${url}`);
+        }
+
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+
+        try {
+            return await new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = () => reject(new Error(`Image failed: ${url}`));
+                img.src = objectUrl;
+            });
+        } finally {
+            URL.revokeObjectURL(objectUrl);
+        }
+    }
+
+    return preloadImage(url);
+}
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -115,9 +243,27 @@ function preloadImage(url) {
         img.crossOrigin = 'anonymous';
         img.referrerPolicy = 'no-referrer';
         img.onload = () => resolve(img);
-        img.onerror = reject;
+        img.onerror = () => reject(new Error(`Image failed: ${url}`));
         img.src = url;
     });
+}
+
+async function loadCanvasImage(urls) {
+    let lastError;
+
+    for (let i = 0; i < urls.length; i++) {
+        if (i > 0) {
+            await delay(IMAGE_LOAD_RETRY_DELAY_MS);
+        }
+
+        try {
+            return await loadImageElement(urls[i]);
+        } catch (error) {
+            lastError = error;
+        }
+    }
+
+    throw lastError ?? new Error('No image URLs to load');
 }
 
 /**
@@ -126,11 +272,10 @@ function preloadImage(url) {
  * @param {Object} obj
  * @returns {string | null}
  */
-function pickImageUrl(obj) {
-    const candidates = [obj.primaryImageSmall, obj.primaryImage].filter(
+function pickImageUrls(obj) {
+    return [obj.primaryImageSmall, obj.primaryImage].filter(
         (url) => url && isMetCdnUrl(url),
     );
-    return candidates[0] || null;
 }
 
 /**
@@ -138,19 +283,24 @@ function pickImageUrl(obj) {
  * @returns {Promise<Object | null>}
  */
 async function fetchArtworkById(id) {
-    const response = await fetch(`${MET_API_BASE}/objects/${id}`);
+    if (!localProxyBase) {
+        await delay(API_REQUEST_DELAY_MS);
+    }
+
+    const response = await fetch(`${metApiBase}/objects/${id}`);
     if (!response.ok) return null;
 
     const obj = await response.json();
-    const image_url = pickImageUrl(obj);
-    if (!image_url) return null;
+    const image_urls = pickImageUrls(obj);
+    if (image_urls.length === 0) return null;
 
     return {
         id: obj.objectID,
         title: obj.title || 'Untitled',
         artist_display: obj.artistDisplayName || 'N/A',
         date_display: obj.objectDate || 'N/A',
-        image_url,
+        image_url: image_urls[0],
+        image_urls,
     };
 }
 
@@ -170,7 +320,11 @@ async function fetchArtworksFromApi() {
         const ids = pickRandomIds(pool, ARTWORK_BATCH_SIZE * 2, seenIds);
         if (ids.length === 0) break;
 
-        const batch = await mapWithConcurrency(ids, API_FETCH_CONCURRENCY, fetchArtworkById);
+        const batch = await mapWithConcurrency(
+            ids,
+            getApiFetchConcurrency(),
+            fetchArtworkById,
+        );
         for (const artwork of batch) {
             if (artworks.length >= ARTWORK_BATCH_SIZE) break;
             if (!artwork || artworkIds.has(artwork.id)) continue;
@@ -193,11 +347,13 @@ async function fetchArtworksFromApi() {
  * @returns {Promise<Array<Object> | null>} The array of artworks or null on error.
  */
 async function fetchArtworksAndCache() {
+    let staleCache = null;
     const cachedData = localStorage.getItem(CACHE_KEY);
 
     if (cachedData) {
         try {
             const cache = JSON.parse(cachedData);
+            staleCache = cache.data;
             const now = new Date().getTime();
 
             // Check for cache hit and freshness
@@ -237,6 +393,10 @@ async function fetchArtworksAndCache() {
 
     } catch (error) {
         console.error('An error occurred during API fetch:', error);
+        if (staleCache?.length) {
+            console.warn('Using stale cache after API fetch failed.');
+            return staleCache;
+        }
         return null;
     }
 }
@@ -280,11 +440,12 @@ function buildAsciiSourceCanvas(img) {
     return { canvas, ctx };
 }
 
-async function applyArtworkImage(url) {
-    const img = await preloadImage(canvasImageUrl(url));
-    imageUrl = url;
+async function applyArtworkImage(artwork) {
+    const displayUrl = artwork.image_url || artwork.image_urls?.[0];
+    const img = await loadCanvasImage(artworkImageCandidates(artwork));
+    imageUrl = displayUrl;
     artworkImage.removeAttribute('crossorigin');
-    artworkImage.src = url;
+    artworkImage.src = displayUrl;
     if (!isRevealed) {
         overlay.style.display = 'flex';
     }
@@ -323,13 +484,13 @@ async function renderArtworkData(skipAttempts = 0) {
     artist.innerHTML = artwork.artist_display || 'N/A';
     date.innerHTML = artwork.date_display || 'N/A';
 
-    if (!artwork.image_url) {
+    if (!artwork.image_url && !artwork.image_urls?.length) {
         currentIndex = (currentIndex + 1) % artworkData.length;
         return renderArtworkData(skipAttempts + 1);
     }
 
     try {
-        await applyArtworkImage(artwork.image_url);
+        await applyArtworkImage(artwork);
     } catch (error) {
         console.error('Failed to load artwork image:', error);
         currentIndex = (currentIndex + 1) % artworkData.length;
@@ -569,7 +730,8 @@ document.fonts.ready.then(() => {
     syncCanvasSize();
 });
 
-t.setup(() => {
+t.setup(async () => {
+    await resolveLocalProxy();
     renderArtworkData();
 });
 

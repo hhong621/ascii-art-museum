@@ -1,6 +1,7 @@
 import express from "express";
 
 const PORT = process.env.PORT || 3001;
+const MET_API_ORIGIN = "https://collectionapi.metmuseum.org";
 const MET_IMAGE_HOST = "images.metmuseum.org";
 const BROWSER_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -60,6 +61,34 @@ function isAllowedMetImageUrl(raw) {
 const app = express();
 app.use(cors);
 
+app.use("/met-api/public/collection/v1", async (req, res) => {
+  const upstreamUrl = `${MET_API_ORIGIN}/public/collection/v1${req.url}`;
+
+  try {
+    const upstream = await fetch(upstreamUrl, {
+      headers: {
+        "User-Agent": BROWSER_UA,
+        Accept: "application/json",
+      },
+      redirect: "follow",
+    });
+
+    const body = await upstream.text();
+    res.status(upstream.status);
+    res.setHeader(
+      "Content-Type",
+      upstream.headers.get("content-type") || "application/json",
+    );
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.send(body);
+  } catch (error) {
+    res.status(502).json({
+      error: "Failed to fetch Met API",
+      message: error.message,
+    });
+  }
+});
+
 app.get("/met-image", async (req, res) => {
   const src = req.query.src;
 
@@ -106,5 +135,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Met image proxy listening on http://localhost:${PORT}`);
+  console.log(`Met dev proxy listening on http://localhost:${PORT}`);
+  console.log(`  API:    http://localhost:${PORT}/met-api/public/collection/v1/...`);
+  console.log(`  Images: http://localhost:${PORT}/met-image?src=...`);
 });
