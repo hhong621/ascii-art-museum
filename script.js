@@ -1,6 +1,10 @@
 // --- Configuration ---
 const MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1";
-const CACHE_KEY = 'metArtworksCacheV2';
+const CACHE_KEY = 'metArtworksCacheV3';
+const MET_IMAGE_HOST = 'images.metmuseum.org';
+const MAX_ASCII_IMAGE_DIM = 1200;
+const API_FETCH_CONCURRENCY = 3;
+const LOCAL_IMAGE_PROXY = 'http://localhost:3001/met-image';
 const CACHE_DURATION = 60 * 60 * 1000; // Cache expiration time in milliseconds (1 hour = 60 * 60 * 1000)
 const ARTWORK_BATCH_SIZE = 10;
 const MIN_BATCH_WITH_IMAGES = 5;
@@ -53,30 +57,80 @@ function pickRandomIds(pool, count, seenIds) {
     return ids;
 }
 
-/**
- * Met's CDN intermittently omits CORS headers; only keep images that load with crossOrigin.
- * @param {string} url
- * @returns {Promise<boolean>}
- */
-async function imageAllowsCors(url) {
+function isMetCdnUrl(url) {
     try {
-        const response = await fetch(url, { method: 'HEAD', mode: 'cors' });
-        return response.ok;
+        return new URL(url).hostname === MET_IMAGE_HOST;
     } catch {
         return false;
     }
 }
 
-/**
- * @param {Object} obj
- * @returns {Promise<string | null>}
- */
-async function pickCorsImageUrl(obj) {
-    const candidates = [obj.primaryImage, obj.primaryImageSmall].filter(Boolean);
-    for (const url of candidates) {
-        if (await imageAllowsCors(url)) return url;
+function getImageProxyBase() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('imageProxy')) {
+        const override = params.get('imageProxy');
+        return override ? override.replace(/\/$/, '') : null;
     }
+
+    const { hostname } = window.location;
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return LOCAL_IMAGE_PROXY;
+    }
+
     return null;
+}
+
+function canvasImageUrl(url) {
+    const proxyBase = getImageProxyBase();
+    if (!proxyBase || !url) return url;
+    return `${proxyBase}?src=${encodeURIComponent(url)}`;
+}
+
+/**
+ * @param {Array<unknown>} items
+ * @param {number} limit
+ * @param {(item: unknown, index: number) => Promise<unknown>} fn
+ * @returns {Promise<Array<unknown>>}
+ */
+async function mapWithConcurrency(items, limit, fn) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+
+    async function worker() {
+        while (nextIndex < items.length) {
+            const index = nextIndex++;
+            results[index] = await fn(items[index], index);
+        }
+    }
+
+    await Promise.all(
+        Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+    );
+    return results;
+}
+
+function preloadImage(url) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.referrerPolicy = 'no-referrer';
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = url;
+    });
+}
+
+/**
+ * Prefer the smaller Met CDN asset; avoid probing images during batch fetch
+ * (parallel crossOrigin loads trigger Met CDN rate limits and CORS failures).
+ * @param {Object} obj
+ * @returns {string | null}
+ */
+function pickImageUrl(obj) {
+    const candidates = [obj.primaryImageSmall, obj.primaryImage].filter(
+        (url) => url && isMetCdnUrl(url),
+    );
+    return candidates[0] || null;
 }
 
 /**
@@ -88,7 +142,7 @@ async function fetchArtworkById(id) {
     if (!response.ok) return null;
 
     const obj = await response.json();
-    const image_url = await pickCorsImageUrl(obj);
+    const image_url = pickImageUrl(obj);
     if (!image_url) return null;
 
     return {
@@ -116,7 +170,7 @@ async function fetchArtworksFromApi() {
         const ids = pickRandomIds(pool, ARTWORK_BATCH_SIZE * 2, seenIds);
         if (ids.length === 0) break;
 
-        const batch = await Promise.all(ids.map(fetchArtworkById));
+        const batch = await mapWithConcurrency(ids, API_FETCH_CONCURRENCY, fetchArtworkById);
         for (const artwork of batch) {
             if (artworks.length >= ARTWORK_BATCH_SIZE) break;
             if (!artwork || artworkIds.has(artwork.id)) continue;
@@ -212,25 +266,29 @@ const MAX_TRAIL = 250;
 const MAX_SPAWN_PER_MOVE = 4;
 let lastMouse = null;
 
-function preloadImage(url) {
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.referrerPolicy = 'no-referrer';
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = url;
-    });
+function buildAsciiSourceCanvas(img) {
+    const scale = Math.min(
+        1,
+        MAX_ASCII_IMAGE_DIM / Math.max(img.naturalWidth, img.naturalHeight),
+    );
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.getImageData(0, 0, 1, 1);
+    return { canvas, ctx };
 }
 
 async function applyArtworkImage(url) {
-    await preloadImage(url);
+    const img = await preloadImage(canvasImageUrl(url));
     imageUrl = url;
+    artworkImage.removeAttribute('crossorigin');
     artworkImage.src = url;
     if (!isRevealed) {
         overlay.style.display = 'flex';
     }
-    await loadArtworkImage(url);
+    await loadArtworkImage(img);
 }
 
 /**
@@ -371,23 +429,6 @@ function hexToRgb(hex) {
     ];
 }
 
-async function loadSourcePixels(url) {
-    const img = await new Promise((resolve, reject) => {
-        const el = new Image();
-        el.crossOrigin = "anonymous";
-        el.referrerPolicy = "no-referrer";
-        el.onload = () => resolve(el);
-        el.onerror = reject;
-        el.src = url;
-    });
-    const canvas = document.createElement("canvas");
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0);
-    return { canvas, ctx };
-}
-
 function isInsideImageGrid(gridX, gridY) {
     if (!myImage) return false;
 
@@ -433,25 +474,18 @@ function configureImage(image) {
     image.cellColor(PARAMS.cellColor);
 }
 
-async function loadArtworkImage(url) {
-    if (!url) return;
+async function loadArtworkImage(img) {
+    if (!img) return;
 
     trail.length = 0;
     lastMouse = null;
 
     try {
         syncCanvasSize();
-        const imagePromise = t.loadImage(url);
-        let pixels = null;
-        try {
-            pixels = await loadSourcePixels(url);
-        } catch (error) {
-            console.warn('Pixel sampling unavailable for image:', url, error);
-        }
-        const image = await imagePromise;
-        myImage = image;
-        sourceCanvas = pixels?.canvas ?? null;
-        sourceCtx = pixels?.ctx ?? null;
+        const pixels = buildAsciiSourceCanvas(img);
+        sourceCanvas = pixels.canvas;
+        sourceCtx = pixels.ctx;
+        myImage = t.createTexture(pixels.canvas);
         configureImage(myImage);
         await new Promise((resolve) => {
             requestAnimationFrame(() => {
@@ -605,7 +639,9 @@ const nextBtn = actionsFolder.addButton({
 // Event listener for next button click, advance index, reset revealed state, and rerender
 nextBtn.on('click', async () => {
     const artworkData = await fetchArtworksAndCache();
-    if (currentIndex < (artworkData.length - 1)) {
+    if (!artworkData?.length) return;
+
+    if (currentIndex < artworkData.length - 1) {
         currentIndex++;
     } else {
         currentIndex = 0;

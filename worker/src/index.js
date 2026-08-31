@@ -1,20 +1,17 @@
-// Proxies AIC IIIF images with CORS headers for the ASCII Art Museum frontend.
-//
-// NOTE: artic.edu blocks Cloudflare Worker subrequests (CF-Worker header / error 1106).
-// This worker will return 403 from upstream when deployed on workers.dev.
-// The live site loads images directly from artic.edu with referrerPolicy: no-referrer instead.
+// Proxies Met Collection CDN images with CORS headers for the ASCII Art Museum frontend.
 
-const IIIF_BASE = "https://www.artic.edu/iiif/2";
-const IMAGE_SIZE = "843,";
-const IMAGE_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MET_IMAGE_HOST = "images.metmuseum.org";
 
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://hhong621.github.io",
   "http://localhost:3000",
+  "http://localhost:3001",
+  "http://localhost:3456",
   "http://localhost:5173",
   "http://localhost:8787",
   "http://127.0.0.1:3000",
+  "http://127.0.0.1:3001",
+  "http://127.0.0.1:3456",
   "http://127.0.0.1:5173",
   "http://127.0.0.1:8787",
 ];
@@ -54,8 +51,13 @@ function jsonResponse(body, status, request, allowedOrigins) {
   });
 }
 
-function buildIiifUrl(imageId) {
-  return `${IIIF_BASE}/${imageId}/full/${IMAGE_SIZE}/0/default.jpg`;
+function isAllowedMetImageUrl(raw) {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.hostname === MET_IMAGE_HOST;
+  } catch {
+    return false;
+  }
 }
 
 export default {
@@ -72,28 +74,27 @@ export default {
     }
 
     const url = new URL(request.url);
-    const imageId = url.searchParams.get("id");
+    const src = url.searchParams.get("src");
 
-    if (!imageId) {
+    if (!src) {
       return jsonResponse(
-        { error: "Missing required query parameter: id" },
+        { error: "Missing required query parameter: src" },
         400,
         request,
         allowedOrigins,
       );
     }
 
-    if (!IMAGE_ID_PATTERN.test(imageId)) {
-      return jsonResponse({ error: "Invalid image id" }, 400, request, allowedOrigins);
+    if (!isAllowedMetImageUrl(src)) {
+      return jsonResponse({ error: "Invalid Met image URL" }, 400, request, allowedOrigins);
     }
 
-    const upstreamUrl = buildIiifUrl(imageId);
-
-    const upstream = await fetch(upstreamUrl, {
+    const upstream = await fetch(src, {
       method: request.method,
       headers: {
         "User-Agent": "ascii-art-museum-proxy (hhong621.github.io)",
         Accept: "image/*",
+        Referer: "",
       },
       cf: {
         cacheEverything: true,
@@ -101,7 +102,8 @@ export default {
       },
     });
 
-    if (!upstream.ok) {
+    const contentType = upstream.headers.get("Content-Type") || "";
+    if (!upstream.ok || !contentType.includes("image/")) {
       return jsonResponse(
         { error: "Upstream image unavailable", status: upstream.status },
         upstream.status === 404 ? 404 : 502,
@@ -110,8 +112,8 @@ export default {
       );
     }
 
-    const headers = new Headers(upstream.headers);
-    headers.set("Content-Type", upstream.headers.get("Content-Type") || "image/jpeg");
+    const headers = new Headers();
+    headers.set("Content-Type", contentType);
     headers.set("Cache-Control", "public, max-age=86400, s-maxage=604800");
     headers.set("Access-Control-Allow-Methods", cors["Access-Control-Allow-Methods"]);
     headers.set("Access-Control-Allow-Headers", cors["Access-Control-Allow-Headers"]);

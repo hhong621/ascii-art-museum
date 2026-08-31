@@ -1,23 +1,20 @@
 import express from "express";
-import {
-  buildUpstreamErrorPayload,
-  fetchUpstreamImage,
-} from "./upstream.js";
 
 const PORT = process.env.PORT || 3001;
-const IIIF_BASE = "https://www.artic.edu/iiif/2";
-const IMAGE_SIZE = "843,";
-const IMAGE_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MET_IMAGE_HOST = "images.metmuseum.org";
+const BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://hhong621.github.io",
   "http://localhost:3000",
   "http://localhost:3001",
+  "http://localhost:3456",
   "http://localhost:5173",
   "http://localhost:5500",
   "http://127.0.0.1:3000",
   "http://127.0.0.1:3001",
+  "http://127.0.0.1:3456",
   "http://127.0.0.1:5173",
   "http://127.0.0.1:5500",
 ];
@@ -36,6 +33,8 @@ function cors(req, res, next) {
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
+  } else if (!origin) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
   res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
@@ -49,35 +48,57 @@ function cors(req, res, next) {
   next();
 }
 
-function buildIiifUrl(imageId) {
-  return `${IIIF_BASE}/${imageId}/full/${IMAGE_SIZE}/0/default.jpg`;
+function isAllowedMetImageUrl(raw) {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.hostname === MET_IMAGE_HOST;
+  } catch {
+    return false;
+  }
 }
 
 const app = express();
 app.use(cors);
 
-app.get("/image", async (req, res) => {
-  const imageId = req.query.id;
+app.get("/met-image", async (req, res) => {
+  const src = req.query.src;
 
-  if (!imageId) {
-    return res.status(400).json({ error: "Missing required query parameter: id" });
+  if (!src || typeof src !== "string") {
+    return res.status(400).json({ error: "Missing required query parameter: src" });
   }
 
-  if (!IMAGE_ID_PATTERN.test(imageId)) {
-    return res.status(400).json({ error: "Invalid image id" });
+  if (!isAllowedMetImageUrl(src)) {
+    return res.status(400).json({ error: "Invalid Met image URL" });
   }
 
-  const upstreamUrl = buildIiifUrl(imageId);
-  const upstream = await fetchUpstreamImage(upstreamUrl);
+  try {
+    const upstream = await fetch(src, {
+      headers: {
+        "User-Agent": BROWSER_UA,
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        Referer: "",
+      },
+      redirect: "follow",
+    });
 
-  if (!upstream.ok) {
-    const status = upstream.status === 404 ? 404 : 502;
-    return res.status(status).json(buildUpstreamErrorPayload(upstream));
+    const contentType = upstream.headers.get("content-type") || "";
+    if (!upstream.ok || !contentType.includes("image/")) {
+      return res.status(upstream.ok ? 502 : upstream.status).json({
+        error: "Upstream image unavailable",
+        status: upstream.status,
+      });
+    }
+
+    const body = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400, s-maxage=604800");
+    res.send(body);
+  } catch (error) {
+    res.status(502).json({
+      error: "Failed to fetch upstream image",
+      message: error.message,
+    });
   }
-
-  res.setHeader("Content-Type", upstream.contentType || "image/jpeg");
-  res.setHeader("Cache-Control", "public, max-age=86400, s-maxage=604800");
-  res.send(upstream.body);
 });
 
 app.get("/health", (_req, res) => {
@@ -85,5 +106,5 @@ app.get("/health", (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`ARTIC-ASCII image proxy listening on http://localhost:${PORT}`);
+  console.log(`Met image proxy listening on http://localhost:${PORT}`);
 });

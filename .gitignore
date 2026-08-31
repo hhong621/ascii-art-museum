@@ -1,0 +1,4 @@
+proxy/node_modules/
+proxy/.env
+proxy/.aic-browser-profile/
+artic-ascii-redirect/
