@@ -15,13 +15,36 @@ A browser-based gallery that renders artworks from the [Metropolitan Museum of A
 
 ## Run locally
 
-Serve the folder over HTTP (ES modules won't load from `file://`):
+Live Server / static hosting is not enough on its own. Met blocks many direct browser requests from `localhost`, so run the dev proxy too:
 
 ```bash
+# terminal 1
 npx serve .
+
+# terminal 2
+cd proxy && npm install && npm run dev
 ```
 
-Then open the URL shown in the terminal.
+## Production CORS proxy
+
+GitHub Pages is static, so the live site uses a Cloudflare Worker to proxy Met API + image requests with CORS headers.
+
+Deploy once (requires a free Cloudflare account):
+
+```bash
+cd worker
+npm install
+npx wrangler login
+npx wrangler deploy
+```
+
+Wrangler prints a `*.workers.dev` URL. Put that URL in `index.html`:
+
+```html
+<meta name="met-proxy" content="https://your-worker-url.workers.dev">
+```
+
+Push to GitHub and the deployed site will auto-detect the proxy on load.
 
 ## Credits
 

@@ -11,6 +11,9 @@ const LOCAL_PROXY_CANDIDATES = [
     'http://127.0.0.1:3001',
     'http://localhost:3001',
 ];
+const PRODUCTION_PROXY_CANDIDATES = [
+    'https://ascii-art-museum-met.8hong16.workers.dev',
+];
 const CACHE_DURATION = 60 * 60 * 1000; // Cache expiration time in milliseconds (1 hour = 60 * 60 * 1000)
 const ARTWORK_BATCH_SIZE = 10;
 const MIN_BATCH_WITH_IMAGES = 5;
@@ -27,51 +30,81 @@ const artworkContainer = document.getElementById('artwork-container');
 const controls = document.getElementById('controls');
 
 let metApiBase = MET_API_DIRECT;
-let localProxyBase = null;
+let metProxyBase = null;
 let proxyProbeDone = false;
+
+function getProductionProxyCandidates() {
+    const meta = document.querySelector('meta[name="met-proxy"]')?.content?.trim();
+    if (meta) {
+        return [meta.replace(/\/$/, '')];
+    }
+    return PRODUCTION_PROXY_CANDIDATES;
+}
+
+function isProductionHost() {
+    return window.location.hostname === 'hhong621.github.io';
+}
 
 function isLocalDevHost() {
     const { hostname } = window.location;
     return hostname === 'localhost' || hostname === '127.0.0.1';
 }
 
-async function resolveLocalProxy() {
-    if (proxyProbeDone) return localProxyBase;
+async function probeProxy(base) {
+    try {
+        const response = await fetch(`${base}/health`, {
+            signal: AbortSignal.timeout(3000),
+        });
+        return response.ok ? base : null;
+    } catch {
+        return null;
+    }
+}
+
+function configureMetProxy(base) {
+    metProxyBase = base;
+    metApiBase = `${base}/met-api/public/collection/v1`;
+    console.log(`Using Met proxy at ${base}`);
+}
+
+async function resolveMetProxy() {
+    if (proxyProbeDone) return metProxyBase;
     proxyProbeDone = true;
 
     const params = new URLSearchParams(window.location.search);
     if (params.has('imageProxy')) {
-        localProxyBase = params.get('imageProxy')
-            ? params.get('imageProxy').replace(/\/$/, '')
-            : null;
-        if (localProxyBase) {
-            metApiBase = `${localProxyBase}/met-api/public/collection/v1`;
+        const override = params.get('imageProxy');
+        if (override) {
+            configureMetProxy(override.replace(/\/$/, ''));
         }
-        return localProxyBase;
+        return metProxyBase;
     }
 
-    if (!isLocalDevHost()) return null;
+    const candidates = isLocalDevHost()
+        ? LOCAL_PROXY_CANDIDATES
+        : isProductionHost()
+            ? getProductionProxyCandidates()
+            : [];
 
-    for (const base of LOCAL_PROXY_CANDIDATES) {
-        try {
-            const response = await fetch(`${base}/health`, {
-                signal: AbortSignal.timeout(1500),
-            });
-            if (response.ok) {
-                localProxyBase = base;
-                metApiBase = `${base}/met-api/public/collection/v1`;
-                console.log(`Using local Met proxy at ${base}`);
-                return localProxyBase;
-            }
-        } catch {
-            // try next candidate
+    for (const base of candidates) {
+        const resolved = await probeProxy(base);
+        if (resolved) {
+            configureMetProxy(resolved);
+            return metProxyBase;
         }
     }
 
-    console.warn(
-        'Local Met proxy not detected. Start it with: cd proxy && npm install && npm run dev',
-    );
-    showDevProxyNotice();
+    if (isLocalDevHost()) {
+        console.warn(
+            'Local Met proxy not detected. Start it with: cd proxy && npm install && npm run dev',
+        );
+        showDevProxyNotice();
+    } else if (isProductionHost()) {
+        console.warn(
+            'Production Met proxy unavailable. Deploy with: cd worker && npx wrangler deploy',
+        );
+    }
+
     return null;
 }
 
@@ -102,7 +135,11 @@ function showDevProxyNotice() {
 }
 
 function getApiFetchConcurrency() {
-    return localProxyBase ? API_FETCH_CONCURRENCY : API_FETCH_CONCURRENCY_DIRECT;
+    return metProxyBase ? API_FETCH_CONCURRENCY : API_FETCH_CONCURRENCY_DIRECT;
+}
+
+function isProxiedImageUrl(url) {
+    return url.includes('/met-image?src=');
 }
 
 /**
@@ -151,7 +188,7 @@ function isMetCdnUrl(url) {
 }
 
 function getImageProxyBase() {
-    if (localProxyBase) return localProxyBase;
+    if (metProxyBase) return metProxyBase;
 
     const params = new URLSearchParams(window.location.search);
     if (!params.has('imageProxy')) return null;
@@ -178,15 +215,15 @@ function artworkImageCandidates(artwork) {
         ? artwork.image_urls
         : [artwork.image_url].filter(Boolean);
 
-    if (localProxyBase) {
-        return [...new Set(urls.map((url) => proxiedImageUrl(url, localProxyBase)))];
+    if (metProxyBase) {
+        return [...new Set(urls.map((url) => proxiedImageUrl(url, metProxyBase)))];
     }
 
     return [...new Set(urls.flatMap(canvasImageCandidates))];
 }
 
 async function loadImageElement(url) {
-    if (localProxyBase && url.startsWith(localProxyBase)) {
+    if (isProxiedImageUrl(url)) {
         const response = await fetch(url);
         if (!response.ok) {
             throw new Error(`Image failed: ${url}`);
@@ -283,7 +320,7 @@ function pickImageUrls(obj) {
  * @returns {Promise<Object | null>}
  */
 async function fetchArtworkById(id) {
-    if (!localProxyBase) {
+    if (!metProxyBase) {
         await delay(API_REQUEST_DELAY_MS);
     }
 
@@ -731,7 +768,7 @@ document.fonts.ready.then(() => {
 });
 
 t.setup(async () => {
-    await resolveLocalProxy();
+    await resolveMetProxy();
     renderArtworkData();
 });
 

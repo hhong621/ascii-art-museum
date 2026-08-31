@@ -1,4 +1,6 @@
 proxy/node_modules/
 proxy/.env
 proxy/.aic-browser-profile/
+worker/node_modules/
+worker/.wrangler/
 artic-ascii-redirect/
