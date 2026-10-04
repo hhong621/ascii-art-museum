@@ -439,8 +439,8 @@ async function fetchArtworksAndCache() {
 }
 
 // --- Implementation and Rendering ---
-const CANVAS_WIDTH = 600;
-const CANVAS_HEIGHT = 600;
+const CANVAS_WIDTH = 800;
+const CANVAS_HEIGHT = 800;
 const t = textmode.create({canvas, width: CANVAS_WIDTH, height: CANVAS_HEIGHT});
 
 function syncCanvasSize() {
@@ -448,8 +448,9 @@ function syncCanvasSize() {
 }
 
 function drawArtworkImage() {
-    if (!myImage) return;
-    t.image(myImage, myImage.width, myImage.height);
+    if (!myImage || !imageDisplayWidth || !imageDisplayHeight) return;
+    // Fixed footprint in grid cells; texture resolution (Detail) is stretched with nearest filtering.
+    t.image(myImage, imageDisplayWidth, imageDisplayHeight);
 }
 
 let myImage;
@@ -457,22 +458,59 @@ let characters = " .:-=+*#%@";
 let imageUrl;
 let sourceCanvas;
 let sourceCtx;
+let currentSourceImage = null;
+let imageDisplayWidth = 0;
+let imageDisplayHeight = 0;
+let rebuildAsciiFrame = 0;
 
 const trail = [];
 const MAX_TRAIL = 250;
 const MAX_SPAWN_PER_MOVE = 4;
 let lastMouse = null;
 
-function buildAsciiSourceCanvas(img) {
-    const scale = Math.min(
+function fitSourcePixelsToGrid(sourceW, sourceH, gridCols, gridRows) {
+    const scale = Math.min(gridCols / sourceW, gridRows / sourceH);
+    return {
+        width: Math.max(1, Math.floor(sourceW * scale)),
+        height: Math.max(1, Math.floor(sourceH * scale)),
+    };
+}
+
+function computeImageDisplayCells(img) {
+    const downscale = Math.min(
         1,
         MAX_ASCII_IMAGE_DIM / Math.max(img.naturalWidth, img.naturalHeight),
     );
+    const sourceW = Math.max(1, Math.round(img.naturalWidth * downscale));
+    const sourceH = Math.max(1, Math.round(img.naturalHeight * downscale));
+    // Match textmode createTexture: draw size fits the grid, not raw source pixels.
+    return fitSourcePixelsToGrid(sourceW, sourceH, CANVAS_WIDTH, CANVAS_HEIGHT);
+}
+
+function buildAsciiSourceCanvas(img) {
+    const maxDim = Math.min(PARAMS.sourceMaxDim, MAX_ASCII_IMAGE_DIM);
+    const sampleScale = Math.min(
+        1,
+        maxDim / Math.max(img.naturalWidth, img.naturalHeight),
+    );
+    let sampleW = Math.max(1, Math.round(img.naturalWidth * sampleScale));
+    let sampleH = Math.max(1, Math.round(img.naturalHeight * sampleScale));
+
+    if (imageDisplayWidth && imageDisplayHeight) {
+        const detailRatio = maxDim / MAX_ASCII_IMAGE_DIM;
+        const capW = Math.max(1, Math.round(imageDisplayWidth * detailRatio));
+        const capH = Math.max(1, Math.round(imageDisplayHeight * detailRatio));
+        const capScale = Math.min(capW / sampleW, capH / sampleH, 1);
+        sampleW = Math.max(1, Math.round(sampleW * capScale));
+        sampleH = Math.max(1, Math.round(sampleH * capScale));
+    }
+
     const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
-    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.width = sampleW;
+    canvas.height = sampleH;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(img, 0, 0, sampleW, sampleH);
     ctx.getImageData(0, 0, 1, 1);
     return { canvas, ctx };
 }
@@ -574,6 +612,7 @@ const PARAMS = {
     cellColor: '#000000',
     charColorMode: "sampled",
     cellColorMode: "fixed",
+    sourceMaxDim: MAX_ASCII_IMAGE_DIM,
 };
 
 // Setup folders and bindings
@@ -585,6 +624,13 @@ const settingsFolder = pane.addFolder({
 const actionsFolder = pane.addFolder({
     title: 'Actions',
     expanded: true,
+});
+
+const sourceMaxDimBinding = settingsFolder.addBinding(PARAMS, 'sourceMaxDim', {
+    label: 'Detail',
+    min: 200,
+    max: MAX_ASCII_IMAGE_DIM,
+    step: 50,
 });
 
 const charColorModeBinding = settingsFolder.addBinding(PARAMS, 'charColorMode', {
@@ -628,10 +674,10 @@ function hexToRgb(hex) {
 }
 
 function isInsideImageGrid(gridX, gridY) {
-    if (!myImage) return false;
+    if (!myImage || !imageDisplayWidth || !imageDisplayHeight) return false;
 
-    const width = myImage.width;
-    const height = myImage.height;
+    const width = imageDisplayWidth;
+    const height = imageDisplayHeight;
     const localX = gridX + Math.floor(width / 2);
     const localY = gridY + Math.floor(height / 2);
 
@@ -646,8 +692,8 @@ function sampleImageColors(gridX, gridY) {
         return { char: fixedChar, cell: fixedCell };
     }
 
-    const width = myImage.width;
-    const height = myImage.height;
+    const width = imageDisplayWidth;
+    const height = imageDisplayHeight;
     const localX = gridX + Math.floor(width / 2);
     const localY = gridY + Math.floor(height / 2);
 
@@ -672,19 +718,58 @@ function configureImage(image) {
     image.cellColor(PARAMS.cellColor);
 }
 
-async function loadArtworkImage(img) {
-    if (!img) return;
+function disposeMyImage() {
+    if (myImage?.dispose) {
+        myImage.dispose();
+    }
+}
 
-    trail.length = 0;
-    lastMouse = null;
+function rebuildAsciiTexture({ resetTrail = false } = {}) {
+    if (!currentSourceImage || !imageDisplayWidth || !imageDisplayHeight) {
+        return;
+    }
+
+    if (resetTrail) {
+        trail.length = 0;
+        lastMouse = null;
+    }
 
     try {
         syncCanvasSize();
-        const pixels = buildAsciiSourceCanvas(img);
+        const pixels = buildAsciiSourceCanvas(currentSourceImage);
         sourceCanvas = pixels.canvas;
         sourceCtx = pixels.ctx;
+        disposeMyImage();
         myImage = t.createTexture(pixels.canvas);
         configureImage(myImage);
+    } catch (error) {
+        console.error("Failed to rebuild ASCII texture:", error);
+        throw error;
+    }
+}
+
+function scheduleRebuildAsciiTexture() {
+    if (rebuildAsciiFrame) {
+        cancelAnimationFrame(rebuildAsciiFrame);
+    }
+    rebuildAsciiFrame = requestAnimationFrame(() => {
+        rebuildAsciiFrame = 0;
+        rebuildAsciiTexture();
+    });
+}
+
+async function loadArtworkImage(img) {
+    if (!img) return;
+
+    currentSourceImage = img;
+    const display = computeImageDisplayCells(img);
+    imageDisplayWidth = display.width;
+    imageDisplayHeight = display.height;
+
+    try {
+        rebuildAsciiTexture({ resetTrail: true });
+        imageDisplayWidth = myImage.width;
+        imageDisplayHeight = myImage.height;
         await new Promise((resolve) => {
             requestAnimationFrame(() => {
                 syncCanvasSize();
@@ -770,6 +855,10 @@ document.fonts.ready.then(() => {
 t.setup(async () => {
     await resolveMetProxy();
     renderArtworkData();
+});
+
+sourceMaxDimBinding.on('change', () => {
+    scheduleRebuildAsciiTexture();
 });
 
 // Event listener for charColorMode, charColorBinding input is hidden when set to "sampled"
