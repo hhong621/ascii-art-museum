@@ -1,6 +1,11 @@
 :root {
     --tp-base-background-color: #161616;
     --tp-container-background-color: #161616;
+    --canvas-display-size: 800px;
+}
+
+html {
+    height: 100%;
 }
 
 body {
@@ -10,7 +15,9 @@ body {
     grid-template-columns: 4fr 8fr;
     background-color: #000000;
     color: #E6E6E3;
-    height: 100vh;
+    height: 100%;
+    max-height: 100vh;
+    overflow: hidden;
     font-family: "Libre Baskerville", serif;
     font-size: 0.875rem;
 }
@@ -21,8 +28,10 @@ body {
     display: flex;
     flex-direction: column;
     gap: 5rem;
+    min-height: 0;
     overflow-x: hidden;
-    overflow-y: scroll;
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 ::-webkit-scrollbar {
@@ -43,28 +52,45 @@ body {
 
 #col-canvas {
     display: flex;
-    flex-direction: col;
-    justify-content: center;
+    flex-direction: column;
+    justify-content: safe center;
     align-items: center;
     gap: 2rem;
-    height: 100vh;
+    min-height: 0;
     min-width: 42.5rem;
+    width: 100%;
+    padding: 2rem 1rem;
+    box-sizing: border-box;
+    overflow-x: auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     background-color: #000000;
 }
 
 #col-canvas-body {
     display: flex;
-    flex-direction: row;
+    flex-direction: column;
     justify-content: center;
-    align-items: start;
-    gap: 1rem;
+    align-items: center;
+    width: 100%;
+    flex-shrink: 0;
+    margin-inline: auto;
+}
+
+#textmode-canvas {
+    display: block;
+    width: var(--canvas-display-size);
+    max-width: 100%;
+    height: auto;
+    margin-inline: auto;
 }
 
 #controls {
     min-width: 18.25rem;
-    position: absolute;
+    position: fixed;
     top: 1rem;
     right: 1rem;
+    z-index: 50;
 }
 
 .tp-pane,
@@ -209,6 +235,8 @@ h1 {
         display: flex;
         flex-direction: column;
         height: auto;
+        max-height: none;
+        overflow: auto;
     }
 
     body.modal-open {
@@ -285,19 +313,21 @@ h1 {
 
     #col-canvas {
         height: fit-content;
+        min-height: auto;
         min-width: 100vw;
+        overflow: visible;
         background-color: #000000;
         padding-top: 2rem;
     }
 
     #col-canvas-body {
-        flex-direction: column;
         padding-bottom: 4rem;
         gap: 2rem;
     }
 
     #textmode-canvas {
         width: 100vw;
+        margin-inline: 0;
     }
 
     canvas {

@@ -439,12 +439,18 @@ async function fetchArtworksAndCache() {
 }
 
 // --- Implementation and Rendering ---
-const CANVAS_WIDTH = 800;
-const CANVAS_HEIGHT = 800;
-const t = textmode.create({canvas, width: CANVAS_WIDTH, height: CANVAS_HEIGHT});
+const DEFAULT_RESOLUTION = 800;
+const MIN_RESOLUTION = 200;
+const MAX_RESOLUTION = 1000;
+const t = textmode.create({
+    canvas,
+    width: DEFAULT_RESOLUTION,
+    height: DEFAULT_RESOLUTION,
+});
 
-function syncCanvasSize() {
-    t.resizeCanvas(CANVAS_WIDTH, CANVAS_HEIGHT);
+function syncResolution() {
+    const resolution = PARAMS?.resolution ?? DEFAULT_RESOLUTION;
+    t.resizeCanvas(resolution, resolution);
 }
 
 function drawArtworkImage() {
@@ -476,6 +482,15 @@ function fitSourcePixelsToGrid(sourceW, sourceH, gridCols, gridRows) {
     };
 }
 
+function getAsciiGridDimensions() {
+    const cols = t.grid?.cols;
+    const rows = t.grid?.rows;
+    if (cols && rows) {
+        return { cols, rows };
+    }
+    return { cols: PARAMS.resolution, rows: PARAMS.resolution };
+}
+
 function computeImageDisplayCells(img) {
     const downscale = Math.min(
         1,
@@ -483,8 +498,15 @@ function computeImageDisplayCells(img) {
     );
     const sourceW = Math.max(1, Math.round(img.naturalWidth * downscale));
     const sourceH = Math.max(1, Math.round(img.naturalHeight * downscale));
+    const { cols, rows } = getAsciiGridDimensions();
     // Match textmode createTexture: draw size fits the grid, not raw source pixels.
-    return fitSourcePixelsToGrid(sourceW, sourceH, CANVAS_WIDTH, CANVAS_HEIGHT);
+    return fitSourcePixelsToGrid(sourceW, sourceH, cols, rows);
+}
+
+function syncImageDisplayFromTexture() {
+    if (!myImage) return;
+    imageDisplayWidth = myImage.width;
+    imageDisplayHeight = myImage.height;
 }
 
 function buildAsciiSourceCanvas(img) {
@@ -608,6 +630,7 @@ const pane = new Pane({
 });
 
 const PARAMS = {
+    resolution: DEFAULT_RESOLUTION,
     charColor: '#ffffff',
     cellColor: '#000000',
     charColorMode: "sampled",
@@ -626,8 +649,15 @@ const actionsFolder = pane.addFolder({
     expanded: true,
 });
 
+const resolutionBinding = settingsFolder.addBinding(PARAMS, 'resolution', {
+    label: 'Density',
+    min: MIN_RESOLUTION,
+    max: MAX_RESOLUTION,
+    step: 10,
+});
+
 const sourceMaxDimBinding = settingsFolder.addBinding(PARAMS, 'sourceMaxDim', {
-    label: 'Detail',
+    label: 'Sharpness',
     min: 200,
     max: MAX_ASCII_IMAGE_DIM,
     step: 50,
@@ -725,7 +755,7 @@ function disposeMyImage() {
 }
 
 function rebuildAsciiTexture({ resetTrail = false } = {}) {
-    if (!currentSourceImage || !imageDisplayWidth || !imageDisplayHeight) {
+    if (!currentSourceImage) {
         return;
     }
 
@@ -735,13 +765,17 @@ function rebuildAsciiTexture({ resetTrail = false } = {}) {
     }
 
     try {
-        syncCanvasSize();
+        syncResolution();
+        const display = computeImageDisplayCells(currentSourceImage);
+        imageDisplayWidth = display.width;
+        imageDisplayHeight = display.height;
         const pixels = buildAsciiSourceCanvas(currentSourceImage);
         sourceCanvas = pixels.canvas;
         sourceCtx = pixels.ctx;
         disposeMyImage();
         myImage = t.createTexture(pixels.canvas);
         configureImage(myImage);
+        syncImageDisplayFromTexture();
     } catch (error) {
         console.error("Failed to rebuild ASCII texture:", error);
         throw error;
@@ -762,17 +796,12 @@ async function loadArtworkImage(img) {
     if (!img) return;
 
     currentSourceImage = img;
-    const display = computeImageDisplayCells(img);
-    imageDisplayWidth = display.width;
-    imageDisplayHeight = display.height;
 
     try {
         rebuildAsciiTexture({ resetTrail: true });
-        imageDisplayWidth = myImage.width;
-        imageDisplayHeight = myImage.height;
         await new Promise((resolve) => {
             requestAnimationFrame(() => {
-                syncCanvasSize();
+                syncResolution();
                 resolve();
             });
         });
@@ -845,16 +874,24 @@ t.mouseMoved((data) => {
 });
 
 t.windowResized(() => {
-    syncCanvasSize();
+    syncResolution();
 });
 
 document.fonts.ready.then(() => {
-    syncCanvasSize();
+    syncResolution();
 });
 
 t.setup(async () => {
     await resolveMetProxy();
     renderArtworkData();
+});
+
+resolutionBinding.on('change', () => {
+    if (currentSourceImage) {
+        scheduleRebuildAsciiTexture();
+    } else {
+        syncResolution();
+    }
 });
 
 sourceMaxDimBinding.on('change', () => {
