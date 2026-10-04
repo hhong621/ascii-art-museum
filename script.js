@@ -142,21 +142,68 @@ function isProxiedImageUrl(url) {
     return url.includes('/met-image?src=');
 }
 
+function getMetSearchApiBase() {
+    return metApiBase.replace('/collection/v1', '/collection/v1.1');
+}
+
 /**
- * @returns {Promise<number[]>}
+ * @param {Record<string, string>} params
+ * @returns {Promise<{ total: number, objectIDs: number[] }>}
  */
-async function searchArtworkIds() {
-    const response = await fetch(`${metApiBase}/search?hasImages=true&q=painting`);
+async function fetchMetSearch(params) {
+    const query = new URLSearchParams(params).toString();
+    const response = await fetch(`${getMetSearchApiBase()}/search?${query}`);
     if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
     }
 
     const data = await response.json();
-    if (!data.objectIDs?.length) {
+    return {
+        total: data.total ?? 0,
+        objectIDs: data.objectIDs ?? [],
+    };
+}
+
+/**
+ * @returns {Promise<number[]>}
+ */
+async function searchArtworkIds() {
+    const probe = await fetchMetSearch({
+        hasImages: 'true',
+        q: 'painting',
+        limit: '1',
+    });
+    if (!probe.total || probe.objectIDs.length === 0) {
         throw new Error('No artworks found.');
     }
 
-    return data.objectIDs.slice(0, SEARCH_POOL_SIZE);
+    const poolSize = Math.min(SEARCH_POOL_SIZE, probe.total);
+    const pageSize = 500;
+    const ids = [];
+    const pagesNeeded = Math.ceil(poolSize / pageSize);
+
+    for (let page = 0; page < pagesNeeded && ids.length < poolSize; page++) {
+        const limit = Math.min(pageSize, poolSize - ids.length);
+        const maxOffset = Math.max(0, probe.total - limit);
+        const offset = Math.floor(Math.random() * (maxOffset + 1));
+        const { objectIDs } = await fetchMetSearch({
+            hasImages: 'true',
+            q: 'painting',
+            limit: String(limit),
+            offset: String(offset),
+        });
+
+        for (const id of objectIDs) {
+            if (!ids.includes(id)) ids.push(id);
+            if (ids.length >= poolSize) break;
+        }
+    }
+
+    if (ids.length === 0) {
+        throw new Error('No artworks found.');
+    }
+
+    return ids;
 }
 
 /**

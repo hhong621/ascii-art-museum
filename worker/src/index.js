@@ -76,9 +76,9 @@ function isAllowedMetImageUrl(raw) {
   }
 }
 
-async function proxyMetApi(request, path, query, allowedOrigins) {
+async function proxyMetApi(request, path, query, allowedOrigins, apiVersion = "v1") {
   const cors = corsHeaders(request, allowedOrigins);
-  const upstreamUrl = `${MET_API_ORIGIN}/public/collection/v1/${path}${query}`;
+  const upstreamUrl = `${MET_API_ORIGIN}/public/collection/${apiVersion}/${path}${query}`;
 
   const upstream = await fetch(upstreamUrl, {
     method: request.method,
@@ -89,6 +89,10 @@ async function proxyMetApi(request, path, query, allowedOrigins) {
     cf: {
       cacheEverything: true,
       cacheTtl: 300,
+      cacheTtlByStatus: {
+        "200-299": 300,
+        "400-599": 0,
+      },
     },
   });
 
@@ -156,9 +160,14 @@ export default {
       return jsonResponse({ ok: true }, 200, request, allowedOrigins);
     }
 
+    if (url.pathname.startsWith("/met-api/public/collection/v1.1/")) {
+      const path = url.pathname.replace("/met-api/public/collection/v1.1/", "");
+      return proxyMetApi(request, path, url.search, allowedOrigins, "v1.1");
+    }
+
     if (url.pathname.startsWith("/met-api/public/collection/v1/")) {
       const path = url.pathname.replace("/met-api/public/collection/v1/", "");
-      return proxyMetApi(request, path, url.search, allowedOrigins);
+      return proxyMetApi(request, path, url.search, allowedOrigins, "v1");
     }
 
     if (url.pathname === "/met-image") {

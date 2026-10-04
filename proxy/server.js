@@ -61,8 +61,8 @@ function isAllowedMetImageUrl(raw) {
 const app = express();
 app.use(cors);
 
-app.use("/met-api/public/collection/v1", async (req, res) => {
-  const upstreamUrl = `${MET_API_ORIGIN}/public/collection/v1${req.url}`;
+async function proxyMetCollectionApi(req, res, apiVersion) {
+  const upstreamUrl = `${MET_API_ORIGIN}/public/collection/${apiVersion}${req.url}`;
 
   try {
     const upstream = await fetch(upstreamUrl, {
@@ -79,7 +79,11 @@ app.use("/met-api/public/collection/v1", async (req, res) => {
       "Content-Type",
       upstream.headers.get("content-type") || "application/json",
     );
-    res.setHeader("Cache-Control", "public, max-age=300");
+    if (upstream.ok) {
+      res.setHeader("Cache-Control", "public, max-age=300");
+    } else {
+      res.setHeader("Cache-Control", "no-store");
+    }
     res.send(body);
   } catch (error) {
     res.status(502).json({
@@ -87,6 +91,14 @@ app.use("/met-api/public/collection/v1", async (req, res) => {
       message: error.message,
     });
   }
+}
+
+app.use("/met-api/public/collection/v1.1", (req, res) => {
+  proxyMetCollectionApi(req, res, "v1.1");
+});
+
+app.use("/met-api/public/collection/v1", (req, res) => {
+  proxyMetCollectionApi(req, res, "v1");
 });
 
 app.get("/met-image", async (req, res) => {
@@ -137,5 +149,6 @@ app.get("/health", (_req, res) => {
 app.listen(PORT, () => {
   console.log(`Met dev proxy listening on http://localhost:${PORT}`);
   console.log(`  API:    http://localhost:${PORT}/met-api/public/collection/v1/...`);
+  console.log(`          http://localhost:${PORT}/met-api/public/collection/v1.1/...`);
   console.log(`  Images: http://localhost:${PORT}/met-image?src=...`);
 });
