@@ -19,6 +19,8 @@ const ARTWORK_BATCH_SIZE = 10;
 const MIN_BATCH_WITH_IMAGES = 5;
 const MAX_BATCH_FETCH_ATTEMPTS = 20;
 const SEARCH_POOL_SIZE = 1000;
+// Met v1.1 search only returns objectIDs for offset + limit within this window.
+const MET_SEARCH_MAX_OFFSET = 10000;
 let currentIndex = 0;
 let isRevealed = false;
 const artworkText = document.getElementById('artwork-text');
@@ -158,10 +160,17 @@ async function fetchMetSearch(params) {
     }
 
     const data = await response.json();
+    const objectIDs = Array.isArray(data.objectIDs) ? data.objectIDs : [];
     return {
         total: data.total ?? 0,
-        objectIDs: data.objectIDs ?? [],
+        objectIDs,
     };
+}
+
+function getMaxMetSearchOffset(total, limit) {
+    const lastIndex = Math.max(0, total - limit);
+    const windowEnd = Math.max(0, MET_SEARCH_MAX_OFFSET - limit);
+    return Math.min(lastIndex, windowEnd);
 }
 
 /**
@@ -184,14 +193,19 @@ async function searchArtworkIds() {
 
     for (let page = 0; page < pagesNeeded && ids.length < poolSize; page++) {
         const limit = Math.min(pageSize, poolSize - ids.length);
-        const maxOffset = Math.max(0, probe.total - limit);
-        const offset = Math.floor(Math.random() * (maxOffset + 1));
-        const { objectIDs } = await fetchMetSearch({
-            hasImages: 'true',
-            q: 'painting',
-            limit: String(limit),
-            offset: String(offset),
-        });
+        const maxOffset = getMaxMetSearchOffset(probe.total, limit);
+        let objectIDs = [];
+
+        for (let attempt = 0; attempt < 5 && objectIDs.length === 0; attempt++) {
+            const offset = Math.floor(Math.random() * (maxOffset + 1));
+            const pageResult = await fetchMetSearch({
+                hasImages: 'true',
+                q: 'painting',
+                limit: String(limit),
+                offset: String(offset),
+            });
+            objectIDs = pageResult.objectIDs;
+        }
 
         for (const id of objectIDs) {
             if (!ids.includes(id)) ids.push(id);
